@@ -4,8 +4,20 @@ class Tog:
         self.masse = masse
         self.fart = 0
 
+    def ok_fart(self, endring):
+        self.fart += endring
+
+    def brems(self, reduksjon):
+        self.fart -= reduksjon
+
+
 tog1 = Tog("Lokomotiv 1", 20000)
 
-print(tog1.navn)
-print(tog1.masse)
+tog1.ok_fart(5)
+print(tog1.fart)
+
+tog1.ok_fart(3)
+print(tog1.fart)
+
+tog1.brems(2)
 print(tog1.fart)
