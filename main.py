@@ -1,6 +1,6 @@
 import pygame
 from bisect import bisect_right
-from math import atan2, cos, degrees, hypot, pi, sin
+from math import atan2, cos, degrees, hypot, pi, sin, tan
 
 
 BREDDE = 900
@@ -8,6 +8,9 @@ HOYDE = 500
 PIKSLER_PER_METER = 5
 START_X = 100
 SKINNE_Y = 400
+
+TYNGDEAKSELERASJON = 9.81
+FYSIKK_DT = 1 / 120
 
 
 class Bane:
@@ -19,7 +22,6 @@ class Bane:
         self.punkter = []
         self.avstander = [0.0]
 
-        # Lag punkter som beskriver én jevn bakke.
         for x in range(0, self.bakke_bredde + 1, 2):
             hoyde = self.bakke_hoyde * (
                 1 - cos(2 * pi * x / self.bakke_bredde)
@@ -42,17 +44,14 @@ class Bane:
         self.bakke_lengde = self.avstander[-1]
 
     def punkt(self, posisjon):
-        # Første del av banen er flat.
         if posisjon <= self.flat_lengde:
             return posisjon, 0.0
 
         rest = posisjon - self.flat_lengde
 
-        # Gjenta bakken videre langs banen.
         runde = int(rest // self.bakke_lengde)
         lokal_posisjon = rest % self.bakke_lengde
 
-        # Finn hvilke to banepunkter posisjonen ligger mellom.
         i = bisect_right(self.avstander, lokal_posisjon) - 1
         i = min(i, len(self.punkter) - 2)
 
@@ -93,13 +92,11 @@ class Bane:
         start = int(tog_posisjon // 2) * 2 - 80
         punkter = []
 
-        # Beregn den synlige delen av banen.
         for posisjon in range(start, start + 300, 2):
             punkter.append(
                 self.skjermpunkt(posisjon, kamera)
             )
 
-        # Tegn bakken under skinnene.
         terreng = punkter + [
             (punkter[-1][0], HOYDE),
             (punkter[0][0], HOYDE)
@@ -109,7 +106,6 @@ class Bane:
             skjerm, (75, 155, 75), terreng
         )
 
-        # Svillene har faste plasseringer langs banen.
         start_sviller = int(start // 8) * 8
 
         for posisjon in range(start_sviller, start + 300, 8):
@@ -130,55 +126,115 @@ class Tog:
     def __init__(self, navn, masse):
         self.navn = navn
         self.masse = masse
-        self.motorkraft = 40000
+
+        # Forenklede øvingsverdier.
+        self.motorkraft = 40000          # Maksimal kraft i N
+        self.motoreffekt = 350000        # Maksimal effekt i W
+        self.bremsekraft = 80000
         self.rullemotstand = 1500
         self.luftmotstand_faktor = 8
 
-        self.fart = 0
-        self.posisjon = 0
+        self.gass = 0
+        self.bremsing = 0
 
-        # Lag et togbilde som kan roteres.
+        self.fart = 0.0
+        self.posisjon = 0.0
+        self.forrige_posisjon = 0.0
+        self.distanse = 0.0
+
         self.bilde = pygame.Surface(
             (120, 45), pygame.SRCALPHA
         )
         self.bilde.fill((200, 50, 50))
 
-    def gi_gass(self, dt):
-        akselerasjon = self.motorkraft / self.masse
-        self.fart += akselerasjon * dt
+    def gi_gass(self, aktiv):
+        self.gass = 1 if aktiv else 0
 
-    def brems(self, reduksjon):
-        self.fart = max(0, self.fart - reduksjon)
+    def brems(self, aktiv):
+        self.bremsing = 1 if aktiv else 0
+
+    def beregn_motorkraft(self):
+        if self.gass == 0:
+            return 0.0
+
+        # Unngå deling på null når toget står stille.
+        fart = max(abs(self.fart), 0.1)
+
+        kraft_fra_effekt = self.motoreffekt / fart
+
+        tilgjengelig_kraft = min(
+            self.motorkraft,
+            kraft_fra_effekt
+        )
+
+        return tilgjengelig_kraft * self.gass
 
     def beregn_motstand(self):
         luftmotstand = self.luftmotstand_faktor * self.fart ** 2
         return self.rullemotstand + luftmotstand
 
-    def oppdater(self, dt):
-        if self.fart > 0:
-            motstand = self.beregn_motstand()
-            akselerasjon = -motstand / self.masse
-
-            self.fart = max(
-                0,
-                self.fart + akselerasjon * dt
-            )
-
-        # Posisjonen måles langs skinnene.
-        self.posisjon += self.fart * dt
-
-    def tegn(self, skjerm, kamera, bane):
-        skinne_x, skinne_y = bane.skjermpunkt(
-            self.posisjon, kamera
-        )
+    def oppdater(self, dt, bane):
+        self.forrige_posisjon = self.posisjon
 
         vinkel = bane.vinkel(self.posisjon)
+
+        kraft_motor = self.beregn_motorkraft()
+
+        kraft_bakke = (
+            -self.masse
+            * TYNGDEAKSELERASJON
+            * sin(vinkel)
+        )
+
+        drivkraft = kraft_motor + kraft_bakke
+
+        motkraft = (
+            self.beregn_motstand()
+            + self.bremsekraft * self.bremsing
+        )
+
+        # Motstand og brems kan holde toget stille.
+        if abs(self.fart) < 0.001:
+            if abs(drivkraft) <= motkraft:
+                self.fart = 0.0
+                return
+
+            retning = 1 if drivkraft > 0 else -1
+
+        else:
+            retning = 1 if self.fart > 0 else -1
+
+        samlet_kraft = drivkraft - retning * motkraft
+
+        akselerasjon = samlet_kraft / self.masse
+        ny_fart = self.fart + akselerasjon * dt
+
+        if self.fart * ny_fart < 0:
+            ny_fart = 0.0
+
+        self.fart = ny_fart
+
+        flytting = self.fart * dt
+        self.posisjon += flytting
+        self.distanse += abs(flytting)
+
+    def interpolert_posisjon(self, andel):
+        return (
+            self.forrige_posisjon
+            + (self.posisjon - self.forrige_posisjon) * andel
+        )
+
+    def tegn(self, skjerm, kamera, bane, posisjon):
+        skinne_x, skinne_y = bane.skjermpunkt(
+            posisjon, kamera
+        )
+
+        vinkel = bane.vinkel(posisjon)
 
         rotert_bilde = pygame.transform.rotate(
             self.bilde, degrees(vinkel)
         )
 
-        # Plasser bildet over skinnen, også når det roteres.
         halv_hoyde = self.bilde.get_height() / 2
 
         senter_x = skinne_x - sin(vinkel) * halv_hoyde
@@ -193,13 +249,19 @@ class Tog:
 
 class Kamera:
     def __init__(self):
-        self.x = 0
+        self.x = 0.0
 
-    def oppdater(self, tog, bane):
-        verden_x, hoyde = bane.punkt(tog.posisjon)
+    def oppdater(self, posisjon, bane):
+        verden_x, hoyde = bane.punkt(posisjon)
 
         tog_x = START_X + verden_x * PIKSLER_PER_METER
-        self.x = max(0, tog_x - 300)
+        skjerm_x = tog_x - self.x
+
+        if skjerm_x > 300:
+            self.x = tog_x - 300
+
+        elif skjerm_x < 100:
+            self.x = tog_x - 100
 
 
 pygame.init()
@@ -214,47 +276,79 @@ bane = Bane()
 tog1 = Tog("Lokomotiv 1", 20000)
 kamera = Kamera()
 
+akkumulator = 0.0
 kjorer = True
 
 while kjorer:
-    dt = klokke.tick(60) / 1000
+    frame_dt = min(klokke.tick(60) / 1000, 0.1)
 
     for hendelse in pygame.event.get():
         if hendelse.type == pygame.QUIT:
             kjorer = False
 
+    if not kjorer:
+        break
+
     taster = pygame.key.get_pressed()
 
-    if taster[pygame.K_RIGHT]:
-        tog1.gi_gass(dt)
+    tog1.gi_gass(taster[pygame.K_RIGHT])
+    tog1.brems(taster[pygame.K_LEFT])
 
-    if taster[pygame.K_LEFT]:
-        tog1.brems(4 * dt)
+    akkumulator += frame_dt
 
-    tog1.oppdater(dt)
-    kamera.oppdater(tog1, bane)
+    while akkumulator >= FYSIKK_DT:
+        tog1.oppdater(FYSIKK_DT, bane)
+        akkumulator -= FYSIKK_DT
+
+    andel = akkumulator / FYSIKK_DT
+    visuell_posisjon = tog1.interpolert_posisjon(andel)
+
+    kamera.oppdater(visuell_posisjon, bane)
 
     skjerm.fill((135, 206, 235))
 
-    bane.tegn(skjerm, kamera, tog1.posisjon)
-    tog1.tegn(skjerm, kamera, bane)
+    bane.tegn(skjerm, kamera, visuell_posisjon)
+    tog1.tegn(skjerm, kamera, bane, visuell_posisjon)
 
-    fart_kmt = tog1.fart * 3.6
+    if tog1.fart > 0.01:
+        retning = "fremover"
+    elif tog1.fart < -0.01:
+        retning = "bakover"
+    else:
+        retning = "stille"
+
+    fart_kmt = abs(tog1.fart) * 3.6
+    helning = tan(bane.vinkel(visuell_posisjon)) * 100
+    motorkraft_kn = tog1.beregn_motorkraft() / 1000
 
     fart_tekst = font.render(
-        f"Fart: {fart_kmt:.1f} km/t",
+        f"Fart: {fart_kmt:.1f} km/t ({retning})",
         True,
         (20, 20, 20)
     )
 
     distanse_tekst = font.render(
-        f"Distanse: {tog1.posisjon:.0f} m",
+        f"Distanse: {tog1.distanse:.0f} m",
+        True,
+        (20, 20, 20)
+    )
+
+    helning_tekst = font.render(
+        f"Helning: {helning:.1f} %",
+        True,
+        (20, 20, 20)
+    )
+
+    motorkraft_tekst = font.render(
+        f"Motorkraft: {motorkraft_kn:.1f} kN",
         True,
         (20, 20, 20)
     )
 
     skjerm.blit(fart_tekst, (20, 20))
     skjerm.blit(distanse_tekst, (20, 55))
+    skjerm.blit(helning_tekst, (20, 90))
+    skjerm.blit(motorkraft_tekst, (20, 125))
 
     pygame.display.flip()
 
