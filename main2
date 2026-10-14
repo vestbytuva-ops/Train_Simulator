@@ -1,0 +1,1101 @@
+import pygame
+from collections import OrderedDict
+from bisect import bisect_right
+from math import atan2, cos, degrees, hypot, pi, sin, tan
+
+
+BREDDE = 1200
+HOYDE = 760
+PIKSLER_PER_METER = 5
+START_X = 100
+SKINNE_Y = 450
+
+TYNGDEAKSELERASJON = 9.81
+FYSIKK_DT = 1 / 120
+
+
+class Bakgrunn:
+    def __init__(self):
+        self.sky_bilde = self.lag_sky()
+        self.skyer = ((70, 75), (380, 110), (690, 65))
+
+        self.fjerne_fjell = (
+            (0, 350), (90, 275), (145, 305),
+            (240, 170), (310, 235), (360, 215),
+            (470, 315), (540, 280), (600, 350)
+        )
+
+        self.naere_fjell = (
+            (0, 385), (100, 325), (180, 345),
+            (310, 255), (400, 315), (500, 285),
+            (650, 350), (730, 330), (800, 385)
+        )
+
+    def lag_sky(self):
+        bilde = pygame.Surface((130, 60), pygame.SRCALPHA)
+        hvit = (245, 250, 255)
+
+        pygame.draw.circle(bilde, hvit, (32, 35), 19)
+        pygame.draw.circle(bilde, hvit, (55, 28), 24)
+        pygame.draw.circle(bilde, hvit, (85, 30), 22)
+        pygame.draw.ellipse(bilde, hvit, (15, 32, 100, 25))
+
+        return bilde
+
+    def tegn_fjellag(self, skjerm, kamera, profil, farge, faktor):
+        periode = profil[-1][0]
+        forskyvning = (kamera.x * faktor) % periode
+
+        # Gjenta fjellprofilen slik at bakgrunnen fortsetter.
+        for runde in range(-1, BREDDE // periode + 2):
+            start_x = runde * periode - forskyvning
+            punkter = []
+
+            for x, y in profil:
+                punkter.append((round(start_x + x), y))
+
+            punkter.extend([
+                (round(start_x + periode), HOYDE),
+                (round(start_x), HOYDE)
+            ])
+
+            pygame.draw.polygon(skjerm, farge, punkter)
+
+    def tegn(self, skjerm, kamera):
+        skjerm.fill((145, 205, 235))
+
+        # Solen ligger langt unna og holder samme skjermposisjon.
+        pygame.draw.circle(
+            skjerm, (255, 235, 160), (760, 90), 28
+        )
+
+        # Skyene beveger seg svært langsomt med kameraet.
+        periode = BREDDE + 200
+
+        for start_x, y in self.skyer:
+            x = (
+                (start_x - kamera.x * 0.08 + 150)
+                % periode
+            ) - 150
+
+            skjerm.blit(self.sky_bilde, (round(x), y))
+
+        # Fjerne fjell beveger seg mindre enn de nærmere fjellene.
+        self.tegn_fjellag(
+            skjerm, kamera,
+            self.fjerne_fjell, (120, 165, 190), 0.15
+        )
+
+        self.tegn_fjellag(
+            skjerm, kamera,
+            self.naere_fjell, (85, 140, 155), 0.30
+        )
+
+
+class Bane:
+    def __init__(self):
+        self.flat_lengde = 80
+        self.bakke_bredde = 320
+        self.bakke_hoyde = 12
+
+        self.punkter = []
+        self.avstander = [0.0]
+
+        for x in range(0, self.bakke_bredde + 1, 2):
+            hoyde = self.bakke_hoyde * (
+                1 - cos(2 * pi * x / self.bakke_bredde)
+            ) / 2
+
+            self.punkter.append((x, hoyde))
+
+            if len(self.punkter) > 1:
+                forrige_x, forrige_hoyde = self.punkter[-2]
+
+                lengde = hypot(
+                    x - forrige_x,
+                    hoyde - forrige_hoyde
+                )
+
+                self.avstander.append(
+                    self.avstander[-1] + lengde
+                )
+
+        self.bakke_lengde = self.avstander[-1]
+
+    def punkt(self, posisjon):
+        if posisjon <= self.flat_lengde:
+            return posisjon, 0.0
+
+        rest = posisjon - self.flat_lengde
+
+        runde = int(rest // self.bakke_lengde)
+        lokal_posisjon = rest % self.bakke_lengde
+
+        i = bisect_right(self.avstander, lokal_posisjon) - 1
+        i = min(i, len(self.punkter) - 2)
+
+        andel = (
+            (lokal_posisjon - self.avstander[i])
+            / (self.avstander[i + 1] - self.avstander[i])
+        )
+
+        x1, h1 = self.punkter[i]
+        x2, h2 = self.punkter[i + 1]
+
+        x = x1 + (x2 - x1) * andel
+        hoyde = h1 + (h2 - h1) * andel
+
+        verden_x = (
+            self.flat_lengde
+            + runde * self.bakke_bredde
+            + x
+        )
+
+        return verden_x, hoyde
+
+    def vinkel(self, posisjon):
+        x1, h1 = self.punkt(posisjon - 0.5)
+        x2, h2 = self.punkt(posisjon + 0.5)
+
+        return atan2(h2 - h1, x2 - x1)
+
+    def skjermpunkt(self, posisjon, kamera):
+        x, hoyde = self.punkt(posisjon)
+
+        skjerm_x = START_X + x * PIKSLER_PER_METER - kamera.x
+        skjerm_y = SKINNE_Y - hoyde * PIKSLER_PER_METER
+
+        return round(skjerm_x), round(skjerm_y)
+
+    def tegn(self, skjerm, kamera, tog_posisjon):
+        start = int(tog_posisjon // 2) * 2 - 80
+        slutt = start + int(BREDDE / PIKSLER_PER_METER) + 180
+        punkter = []
+
+        for posisjon in range(start, slutt, 2):
+            punkter.append(
+                self.skjermpunkt(posisjon, kamera)
+            )
+
+        terreng = punkter + [
+            (punkter[-1][0], HOYDE),
+            (punkter[0][0], HOYDE)
+        ]
+
+        pygame.draw.polygon(
+            skjerm, (75, 155, 75), terreng
+        )
+
+        start_sviller = int(start // 8) * 8
+
+        for posisjon in range(start_sviller, slutt, 8):
+            x, y = self.skjermpunkt(posisjon, kamera)
+
+            pygame.draw.rect(
+                skjerm,
+                (110, 80, 45),
+                (x - 10, y, 20, 8)
+            )
+
+        pygame.draw.lines(
+            skjerm, (70, 70, 70), False, punkter, 4
+        )
+
+
+class Tog:
+    def __init__(self, navn, masse):
+        self.navn = navn
+        self.masse = masse
+
+        # Forenklede øvingsverdier.
+        self.motorkraft = 40000
+        self.motoreffekt = 350000
+        self.bremsekraft = 80000
+        self.rullemotstand = 1500
+        self.luftmotstand_faktor = 8
+
+        self.gass = 0
+        self.bremsing = 0
+
+        self.fart = 0.0
+        self.posisjon = 0.0
+        self.forrige_posisjon = 0.0
+        self.distanse = 0.0
+        self.observere = []
+        self._siste_data = None
+
+        self.hjulradius = 8
+        self.hjulsentre = ((22, 37), (98, 37))
+        self.bilde = self.lag_bilde()
+
+    def lag_bilde(self):
+        bilde = pygame.Surface(
+            (120, 45), pygame.SRCALPHA
+        )
+
+        rod = (205, 55, 55)
+        mork = (40, 45, 50)
+
+        pygame.draw.rect(bilde, mork, (7, 29, 108, 6))
+
+        pygame.draw.rect(
+            bilde, rod, (10, 16, 70, 16),
+            border_radius=3
+        )
+
+        pygame.draw.rect(
+            bilde, rod, (78, 3, 32, 29),
+            border_radius=3
+        )
+
+        pygame.draw.rect(bilde, mork, (76, 1, 36, 4))
+
+        pygame.draw.rect(
+            bilde, mork, (81, 6, 24, 14),
+            border_radius=2
+        )
+
+        pygame.draw.rect(
+            bilde, (135, 205, 225), (83, 8, 20, 10)
+        )
+
+        pygame.draw.line(
+            bilde, mork, (94, 8), (94, 17), 1
+        )
+
+        pygame.draw.rect(
+            bilde, (245, 215, 140), (11, 28, 98, 3)
+        )
+
+        for x in range(20, 68, 8):
+            pygame.draw.line(
+                bilde, mork, (x, 20), (x, 26), 2
+            )
+
+        pygame.draw.rect(bilde, mork, (42, 11, 6, 5))
+        pygame.draw.rect(bilde, mork, (41, 9, 8, 3))
+
+        pygame.draw.rect(bilde, mork, (1, 29, 6, 3))
+        pygame.draw.rect(bilde, mork, (115, 29, 5, 3))
+
+        pygame.draw.circle(
+            bilde, (255, 240, 170), (110, 24), 2
+        )
+
+        return bilde
+
+    def tegn_hjul(self, bilde, posisjon):
+        radius_i_meter = self.hjulradius / PIKSLER_PER_METER
+        hjulvinkel = posisjon / radius_i_meter
+
+        for x, y in self.hjulsentre:
+            pygame.draw.circle(
+                bilde, (25, 28, 31),
+                (x, y), self.hjulradius
+            )
+
+            pygame.draw.circle(
+                bilde, (110, 115, 120),
+                (x, y), self.hjulradius - 2
+            )
+
+            for forskyvning in (0, 2 * pi / 3, 4 * pi / 3):
+                vinkel = hjulvinkel + forskyvning
+
+                ende_x = round(
+                    x + cos(vinkel) * (self.hjulradius - 2)
+                )
+
+                ende_y = round(
+                    y + sin(vinkel) * (self.hjulradius - 2)
+                )
+
+                pygame.draw.line(
+                    bilde, (40, 45, 50),
+                    (x, y), (ende_x, ende_y), 2
+                )
+
+            pygame.draw.circle(
+                bilde, (185, 190, 195), (x, y), 2
+            )
+
+    def abonner(self, callback):
+        self.observere.append(callback)
+
+    def varsle_data(self, bane):
+        # Panelet får beskjed bare når de synlige dataene endres.
+        retning = "STILLE"
+        if self.fart > 0.01:
+            retning = "FREMOVER"
+        elif self.fart < -0.01:
+            retning = "BAKOVER"
+
+        kraft = self.beregn_motorkraft()
+        data = {
+            "navn": self.navn,
+            "fart": round(abs(self.fart) * 3.6, 1),
+            "retning": retning,
+            "distanse": round(self.distanse),
+            "posisjon": round(self.posisjon),
+            "helning": round(tan(bane.vinkel(self.posisjon)) * 100, 1),
+            "motorkraft": round(kraft / 1000, 1),
+            "effekt": round(max(0, kraft * self.fart) / 1000),
+            "gass": round(self.gass * 100),
+            "brems": round(self.bremsing * 100),
+            "masse": self.masse / 1000,
+            "makseffekt": self.motoreffekt / 1000
+        }
+
+        if data != self._siste_data:
+            self._siste_data = data
+            for callback in self.observere:
+                callback(data.copy())
+
+    def gi_gass(self, aktiv):
+        self.gass = 1 if aktiv else 0
+
+    def brems(self, aktiv):
+        self.bremsing = 1 if aktiv else 0
+
+    def beregn_motorkraft(self):
+        if self.gass == 0:
+            return 0.0
+
+        fart = max(abs(self.fart), 0.1)
+        kraft_fra_effekt = self.motoreffekt / fart
+
+        tilgjengelig_kraft = min(
+            self.motorkraft,
+            kraft_fra_effekt
+        )
+
+        return tilgjengelig_kraft * self.gass
+
+    def beregn_motstand(self):
+        luftmotstand = self.luftmotstand_faktor * self.fart ** 2
+        return self.rullemotstand + luftmotstand
+
+    def oppdater(self, dt, bane):
+        self.forrige_posisjon = self.posisjon
+        vinkel = bane.vinkel(self.posisjon)
+
+        kraft_motor = self.beregn_motorkraft()
+
+        kraft_bakke = (
+            -self.masse
+            * TYNGDEAKSELERASJON
+            * sin(vinkel)
+        )
+
+        drivkraft = kraft_motor + kraft_bakke
+
+        motkraft = (
+            self.beregn_motstand()
+            + self.bremsekraft * self.bremsing
+        )
+
+        if abs(self.fart) < 0.001:
+            if abs(drivkraft) <= motkraft:
+                self.fart = 0.0
+                self.varsle_data(bane)
+                return
+
+            retning = 1 if drivkraft > 0 else -1
+        else:
+            retning = 1 if self.fart > 0 else -1
+
+        samlet_kraft = drivkraft - retning * motkraft
+        akselerasjon = samlet_kraft / self.masse
+        ny_fart = self.fart + akselerasjon * dt
+
+        if self.fart * ny_fart < 0:
+            ny_fart = 0.0
+
+        self.fart = ny_fart
+
+        flytting = self.fart * dt
+        self.posisjon += flytting
+        self.distanse += abs(flytting)
+        self.varsle_data(bane)
+
+    def interpolert_posisjon(self, andel):
+        return (
+            self.forrige_posisjon
+            + (self.posisjon - self.forrige_posisjon) * andel
+        )
+
+    def tegn(self, skjerm, kamera, bane, posisjon):
+        bilde = self.bilde.copy()
+        self.tegn_hjul(bilde, posisjon)
+
+        skinne_x, skinne_y = bane.skjermpunkt(
+            posisjon, kamera
+        )
+
+        vinkel = bane.vinkel(posisjon)
+
+        rotert_bilde = pygame.transform.rotate(
+            bilde, degrees(vinkel)
+        )
+
+        halv_hoyde = self.bilde.get_height() / 2
+
+        senter_x = skinne_x - sin(vinkel) * halv_hoyde
+        senter_y = skinne_y - cos(vinkel) * halv_hoyde
+
+        rektangel = rotert_bilde.get_rect(
+            center=(round(senter_x), round(senter_y))
+        )
+
+        skjerm.blit(rotert_bilde, rektangel)
+
+
+class Kamera:
+    def __init__(self):
+        self.x = 0.0
+
+    def oppdater(self, posisjon, bane):
+        verden_x, hoyde = bane.punkt(posisjon)
+
+        tog_x = START_X + verden_x * PIKSLER_PER_METER
+        skjerm_x = tog_x - self.x
+
+        if skjerm_x > 300:
+            self.x = tog_x - 300
+        elif skjerm_x < 100:
+            self.x = tog_x - 100
+
+
+
+# Farger brukes av både meny og instrumentpanel.
+UI_BAKGRUNN = (17, 30, 44)
+UI_KORT = (28, 46, 64)
+UI_KANT = (55, 77, 95)
+UI_HVIT = (239, 246, 250)
+UI_DEMPET = (163, 184, 198)
+UI_AKSENT = (112, 230, 203)
+UI_ORANSJE = (255, 190, 112)
+
+
+def tall(verdi, desimaler=1):
+    return f"{verdi:.{desimaler}f}".replace(".", ",")
+
+
+class Tekstcache:
+    def __init__(self):
+        self.fonter = {}
+        self.bilder = OrderedDict()
+
+    def font(self, storrelse, fet=False):
+        nokkel = (storrelse, fet)
+        if nokkel not in self.fonter:
+            self.fonter[nokkel] = pygame.font.SysFont(
+                ("segoeui", "dejavusans", "arial"), storrelse, bold=fet
+            )
+        return self.fonter[nokkel]
+
+    def bilde(self, tekst, storrelse, farge=UI_HVIT, fet=False,
+              maks_bredde=None):
+        if maks_bredde:
+            while (storrelse > 10
+                   and self.font(storrelse, fet).size(tekst)[0] > maks_bredde):
+                storrelse -= 1
+
+        nokkel = (tekst, storrelse, farge, fet)
+        if nokkel in self.bilder:
+            self.bilder.move_to_end(nokkel)
+            return self.bilder[nokkel]
+
+        bilde = self.font(storrelse, fet).render(tekst, True, farge)
+        self.bilder[nokkel] = bilde
+
+        # Begrens minnebruk under lange turer.
+        if len(self.bilder) > 384:
+            self.bilder.popitem(last=False)
+        return bilde
+
+    def tegn(self, skjerm, tekst, posisjon, storrelse=18, farge=UI_HVIT,
+             fet=False, anker="topleft", maks_bredde=None):
+        bilde = self.bilde(
+            tekst, storrelse, farge, fet, maks_bredde
+        )
+        rektangel = bilde.get_rect(**{anker: posisjon})
+        skjerm.blit(bilde, rektangel)
+        return rektangel
+
+
+def tegn_kort(skjerm, rektangel, farge=UI_KORT, radius=16, kant=True):
+    pygame.draw.rect(
+        skjerm, farge, rektangel, border_radius=radius
+    )
+    if kant:
+        pygame.draw.rect(
+            skjerm, UI_KANT, rektangel, 1, border_radius=radius
+        )
+
+
+class Instrumentpanel:
+    def __init__(self, tekst):
+        self.tekst = tekst
+        self.data = {}
+        self.rektangel = pygame.Rect(20, HOYDE - 236, BREDDE - 40, 216)
+
+        # Fordel kortene i en rad inne i panelet.
+        mellomrom = 14
+        tilgjengelig = self.rektangel.width - 40 - 4 * mellomrom
+        x = self.rektangel.left + 20
+        self.kort = []
+
+        for andel in (0.235, 0.19, 0.17, 0.17, 0.235):
+            kort = pygame.Rect(
+                x, self.rektangel.top + 44,
+                int(tilgjengelig * andel), 138
+            )
+            self.kort.append(kort)
+            x = kort.right + mellomrom
+
+    def motta_data(self, data):
+        # GUI-en får data gjennom en melding fra Tog.
+        self.data = data
+
+    def metrikk(self, skjerm, kort, tittel, verdi, enhet,
+                undertittel, farge=UI_HVIT):
+        t = self.tekst
+        t.tegn(skjerm, tittel, (kort.left + 16, kort.top + 12),
+               13, UI_DEMPET, True, maks_bredde=kort.width - 32)
+        t.tegn(skjerm, verdi, (kort.left + 16, kort.top + 37),
+               36, farge, True, maks_bredde=kort.width - 32)
+        t.tegn(skjerm, enhet, (kort.left + 16, kort.top + 83),
+               14, UI_DEMPET)
+        t.tegn(skjerm, undertittel,
+               (kort.left + 16, kort.bottom - 26),
+               12, UI_DEMPET, maks_bredde=kort.width - 32)
+
+    def indikator(self, skjerm, kort, navn, prosent, y, farge):
+        t = self.tekst
+        t.tegn(skjerm, navn, (kort.left + 16, y), 14)
+        t.tegn(skjerm, f"{prosent} %", (kort.right - 16, y),
+               14, farge, True, anker="topright")
+
+        spor = pygame.Rect(kort.left + 16, y + 23, kort.width - 32, 8)
+        pygame.draw.rect(skjerm, (11, 24, 37), spor, border_radius=4)
+        fyll = spor.copy()
+        fyll.width = round(spor.width * prosent / 100)
+        if fyll.width > 0:
+            pygame.draw.rect(skjerm, farge, fyll, border_radius=4)
+
+    def tegn(self, skjerm):
+        if not self.data:
+            return
+
+        d = self.data
+        t = self.tekst
+        p = self.rektangel
+        pygame.draw.rect(
+            skjerm, (10, 21, 31), p.move(0, 5), border_radius=20
+        )
+        tegn_kort(skjerm, p, UI_BAKGRUNN, 20)
+
+        t.tegn(skjerm, d["navn"].upper(), (p.left + 20, p.top + 15),
+               14, UI_HVIT, True)
+        t.tegn(
+            skjerm,
+            f'{tall(d["masse"])} t  /  {tall(d["makseffekt"], 0)} kW',
+            (p.right - 20, p.top + 15), 14, UI_DEMPET, anker="topright"
+        )
+
+        for kort in self.kort:
+            tegn_kort(skjerm, kort)
+
+        fartkort, distansekort, bakkekort, motorkort, kontrollkort = self.kort
+
+        t.tegn(skjerm, "FART", (fartkort.left + 16, fartkort.top + 12),
+               13, UI_DEMPET, True)
+
+        fartbilde = t.bilde(
+            tall(d["fart"]), 52, UI_HVIT, True, fartkort.width - 70
+        )
+        skjerm.blit(fartbilde, (fartkort.left + 16, fartkort.top + 33))
+        enhet_x = min(
+            fartkort.right - 49,
+            fartkort.left + 24 + fartbilde.get_width()
+        )
+        t.tegn(skjerm, "km/t", (enhet_x, fartkort.top + 72), 14, UI_DEMPET)
+
+        farge = UI_DEMPET if d["retning"] == "STILLE" else UI_AKSENT
+        if d["retning"] == "BAKOVER":
+            farge = UI_ORANSJE
+        status = pygame.Rect(fartkort.left + 16, fartkort.bottom - 33, 112, 23)
+        pygame.draw.rect(skjerm, (17, 34, 47), status, border_radius=11)
+        t.tegn(skjerm, d["retning"], status.center,
+               12, farge, True, anker="center")
+
+        distanse = d["distanse"]
+        if distanse >= 1000:
+            verdi, enhet = tall(distanse / 1000, 2), "km"
+        else:
+            verdi, enhet = tall(distanse, 0), "meter"
+        self.metrikk(
+            skjerm, distansekort, "KJØRT DISTANSE", verdi, enhet,
+            f'Posisjon {tall(d["posisjon"], 0)} m'
+        )
+
+        helning = d["helning"]
+        beskrivelse = "Flatt"
+        bakkefarge = UI_HVIT
+        if helning > 0.1:
+            beskrivelse, bakkefarge = "Oppover", UI_ORANSJE
+        elif helning < -0.1:
+            beskrivelse, bakkefarge = "Nedover", UI_AKSENT
+
+        self.metrikk(
+            skjerm, bakkekort, "HELNING", tall(helning), "%",
+            beskrivelse, bakkefarge
+        )
+        self.metrikk(
+            skjerm, motorkort, "MOTORKRAFT", tall(d["motorkraft"]), "kN",
+            f'Effekt {tall(d["effekt"], 0)} kW'
+        )
+
+        t.tegn(
+            skjerm, "GASS / BREMS",
+            (kontrollkort.left + 16, kontrollkort.top + 12),
+            13, UI_DEMPET, True
+        )
+        self.indikator(
+            skjerm, kontrollkort, "Gass", d["gass"],
+            kontrollkort.top + 32, UI_AKSENT
+        )
+        self.indikator(
+            skjerm, kontrollkort, "Brems", d["brems"],
+            kontrollkort.top + 73, UI_ORANSJE
+        )
+        t.tegn(
+            skjerm, "Hold høyre / venstre",
+            (kontrollkort.left + 16, kontrollkort.bottom - 25),
+            12, UI_DEMPET
+        )
+
+        t.tegn(skjerm, "Høyre / D: gass   ·   Venstre / A: brems",
+               (p.left + 20, p.bottom - 23), 13, UI_DEMPET)
+        t.tegn(skjerm, "Esc / P: pause   ·   R: ny tur",
+               (p.right - 20, p.bottom - 23), 13, UI_DEMPET,
+               anker="topright")
+
+
+class Grensesnitt:
+    def __init__(self):
+        self.tekst = Tekstcache()
+        self.panel = Instrumentpanel(self.tekst)
+        self.valg = {"meny": 0, "pause": 0, "hjelp": 0}
+        self.mus = (-1000, -1000)
+        self.togbilde = None
+
+        self.menyslor = pygame.Surface((BREDDE, HOYDE), pygame.SRCALPHA)
+        self.menyslor.fill((8, 17, 28, 182))
+        self.pauseslor = pygame.Surface((BREDDE, HOYDE), pygame.SRCALPHA)
+        self.pauseslor.fill((6, 13, 23, 172))
+
+        self.pauseboks = pygame.Rect(0, 0, 460, 424)
+        self.pauseboks.center = (BREDDE // 2, HOYDE // 2)
+        self.hjelpeboks = pygame.Rect(0, 0, 700, 530)
+        self.hjelpeboks.center = (BREDDE // 2, HOYDE // 2)
+
+        self.pauseknapp = pygame.Rect(BREDDE - 132, 20, 112, 44)
+        self.nyknapp = pygame.Rect(self.pauseknapp.left - 154, 20, 142, 44)
+
+    def sett_togbilde(self, bilde):
+        self.togbilde = pygame.transform.smoothscale(bilde, (320, 120))
+
+    def knapper(self, skjermnavn):
+        if skjermnavn == "meny":
+            valg = (
+                ("Start tur", "start"),
+                ("Kontroller", "hjelp"),
+                ("Avslutt", "avslutt")
+            )
+            return [
+                (navn, handling, pygame.Rect(
+                    int(BREDDE * 0.09), int(HOYDE * 0.55) + i * 68, 420, 54
+                ))
+                for i, (navn, handling) in enumerate(valg)
+            ]
+
+        if skjermnavn == "pause":
+            valg = (
+                ("Fortsett", "fortsett"),
+                ("Start på nytt", "omstart"),
+                ("Hovedmeny", "meny")
+            )
+            return [
+                (navn, handling, pygame.Rect(
+                    self.pauseboks.left + 42,
+                    self.pauseboks.top + 124 + i * 67,
+                    self.pauseboks.width - 84, 52
+                ))
+                for i, (navn, handling) in enumerate(valg)
+            ]
+
+        if skjermnavn == "hjelp":
+            return [("Tilbake", "tilbake", pygame.Rect(
+                self.hjelpeboks.centerx - 170,
+                self.hjelpeboks.bottom - 82, 340, 52
+            ))]
+        return []
+
+    def tegn_knapp(self, skjerm, navn, rektangel, valgt=False, liten=False):
+        farge = UI_AKSENT if valgt else UI_KORT
+        tekstfarge = (12, 32, 37) if valgt else UI_HVIT
+        tegn_kort(skjerm, rektangel, farge, 12)
+        if valgt:
+            pygame.draw.rect(
+                skjerm, (179, 255, 234), rektangel, 2, border_radius=12
+            )
+        self.tekst.tegn(
+            skjerm, navn, rektangel.center,
+            16 if liten else 20, tekstfarge, True,
+            anker="center", maks_bredde=rektangel.width - 28
+        )
+
+    def tegn_knapper(self, skjerm, skjermnavn):
+        for i, (navn, handling, rektangel) in enumerate(self.knapper(skjermnavn)):
+            self.tegn_knapp(
+                skjerm, navn, rektangel,
+                valgt=(i == self.valg[skjermnavn])
+            )
+
+    def tegn_meny(self, skjerm):
+        skjerm.blit(self.menyslor, (0, 0))
+        t = self.tekst
+        venstre = int(BREDDE * 0.09)
+
+        t.tegn(skjerm, "TOGSIMULATOR", (venstre, 126),
+               15, UI_AKSENT, True)
+        t.tegn(skjerm, "TRAIN", (venstre - 4, 157),
+               78, UI_HVIT, True)
+        t.tegn(skjerm, "SIMULATOR", (venstre - 4, 242),
+               78, UI_HVIT, True, maks_bredde=540)
+        t.tegn(skjerm, "Følg skinnene gjennom bakkene.",
+               (venstre, 350), 20, UI_DEMPET)
+        t.tegn(skjerm, "Ta kontroll over fart og brems.",
+               (venstre, 379), 20, UI_DEMPET)
+
+        kort = pygame.Rect(int(BREDDE * 0.60), 155, 372, 365)
+        pygame.draw.rect(skjerm, (7, 16, 27), kort.move(0, 8), border_radius=24)
+        tegn_kort(skjerm, kort, UI_BAKGRUNN, 24)
+
+        d = self.panel.data
+        t.tegn(skjerm, d.get("navn", "Lokomotiv 1"),
+               (kort.left + 24, kort.top + 24), 22, UI_HVIT, True)
+        t.tegn(skjerm, "KLAR FOR AVREISE",
+               (kort.left + 24, kort.top + 58), 12, UI_AKSENT, True)
+
+        if self.togbilde:
+            skjerm.blit(
+                self.togbilde,
+                self.togbilde.get_rect(midbottom=(kort.centerx, kort.top + 211))
+            )
+        pygame.draw.line(
+            skjerm, (100, 132, 148),
+            (kort.left + 24, kort.top + 211),
+            (kort.right - 24, kort.top + 211), 3
+        )
+
+        t.tegn(skjerm, "MASSE", (kort.left + 24, kort.top + 249),
+               12, UI_DEMPET, True)
+        t.tegn(skjerm, f'{tall(d.get("masse", 20))} t',
+               (kort.left + 24, kort.top + 274), 30, UI_HVIT, True)
+        t.tegn(skjerm, "MAKS EFFEKT", (kort.centerx + 20, kort.top + 249),
+               12, UI_DEMPET, True)
+        t.tegn(skjerm, f'{tall(d.get("makseffekt", 350), 0)} kW',
+               (kort.centerx + 20, kort.top + 274), 30, UI_HVIT, True)
+
+        self.tegn_knapper(skjerm, "meny")
+        t.tegn(
+            skjerm, "Opp / ned: velg   ·   Enter: bekreft   ·   Du kan også bruke musen",
+            (BREDDE // 2, HOYDE - 36), 15, UI_DEMPET, anker="center"
+        )
+
+    def tegn_pause(self, skjerm):
+        skjerm.blit(self.pauseslor, (0, 0))
+        p = self.pauseboks
+        tegn_kort(skjerm, p, UI_BAKGRUNN, 24)
+
+        self.tekst.tegn(skjerm, "Pause", (p.centerx, p.top + 32),
+                        38, UI_HVIT, True, anker="midtop")
+        self.tekst.tegn(
+            skjerm, "Fortsett turen eller start på nytt.",
+            (p.centerx, p.top + 86), 17, UI_DEMPET, anker="midtop"
+        )
+        self.tegn_knapper(skjerm, "pause")
+        self.tekst.tegn(
+            skjerm, "Esc for å fortsette", (p.centerx, p.bottom - 31),
+            14, UI_DEMPET, anker="center"
+        )
+
+    def tegn_hjelp(self, skjerm):
+        skjerm.blit(self.pauseslor, (0, 0))
+        p = self.hjelpeboks
+        tegn_kort(skjerm, p, UI_BAKGRUNN, 24)
+
+        t = self.tekst
+        t.tegn(skjerm, "Slik kjører du", (p.left + 32, p.top + 27),
+               34, UI_HVIT, True)
+        t.tegn(skjerm, "Hold piltastene inne for å styre toget.",
+               (p.left + 32, p.top + 79), 18, UI_DEMPET)
+
+        rader = (
+            ("Høyre / D", "Gi gass. Slipp tasten for å trille videre."),
+            ("Venstre / A", "Brems. Hold inne for å stå stille i en bakke."),
+            ("Esc / P", "Pause eller fortsett turen."),
+            ("R", "Start en ny tur fra begynnelsen.")
+        )
+
+        for i, (tast, forklaring) in enumerate(rader):
+            y = p.top + 133 + i * 65
+            tastboks = pygame.Rect(p.left + 32, y, 136, 40)
+            tegn_kort(skjerm, tastboks, UI_KORT, 9)
+            t.tegn(skjerm, tast, tastboks.center,
+                   16, UI_AKSENT, True, anker="center")
+            t.tegn(
+                skjerm, forklaring, (tastboks.right + 20, y + 11),
+                16, UI_HVIT, maks_bredde=p.right - tastboks.right - 50
+            )
+
+        self.tegn_knapper(skjerm, "hjelp")
+
+    def tegn(self, skjerm, skjermer):
+        if "spill" in skjermer:
+            self.panel.tegn(skjerm)
+            brand = pygame.Rect(20, 20, 246, 52)
+            tegn_kort(skjerm, brand, UI_BAKGRUNN, 12)
+            self.tekst.tegn(
+                skjerm, "TRAIN SIMULATOR", brand.center,
+                19, UI_HVIT, True, anker="center"
+            )
+            self.tegn_knapp(
+                skjerm, "Ny tur", self.nyknapp,
+                valgt=self.nyknapp.collidepoint(self.mus), liten=True
+            )
+            self.tegn_knapp(
+                skjerm, "Pause", self.pauseknapp,
+                valgt=self.pauseknapp.collidepoint(self.mus), liten=True
+            )
+        else:
+            self.tegn_meny(skjerm)
+
+        if skjermer[-1] == "pause":
+            self.tegn_pause(skjerm)
+        elif skjermer[-1] == "hjelp":
+            self.tegn_hjelp(skjerm)
+
+
+class Spill:
+    def __init__(self):
+        pygame.init()
+        info = pygame.display.Info()
+        skala = min(
+            1100 / BREDDE,
+            max(640, info.current_w - 80) / BREDDE,
+            max(400, info.current_h - 100) / HOYDE
+        )
+        vindusstorrelse = (round(BREDDE * skala), round(HOYDE * skala))
+        self.vindu = pygame.display.set_mode(vindusstorrelse, pygame.RESIZABLE)
+        pygame.display.set_caption("Train Simulator")
+        self.lerret = pygame.Surface((BREDDE, HOYDE))
+        self.klokke = pygame.time.Clock()
+
+        self.bakgrunn = Bakgrunn()
+        self.bane = Bane()
+        self.gui = Grensesnitt()
+        self.kjorer = True
+        self.skjermer = ["meny"]
+        self.ny_tur()
+
+    def ny_tur(self):
+        self.tog = Tog("Lokomotiv 1", 20000)
+        self.kamera = Kamera()
+        self.akkumulator = 0.0
+        self.synlig_posisjon = 0.0
+
+        self.tog.abonner(self.gui.panel.motta_data)
+        self.tog.varsle_data(self.bane)
+
+        bilde = self.tog.bilde.copy()
+        self.tog.tegn_hjul(bilde, 0)
+        self.gui.sett_togbilde(bilde)
+
+    def visningsrektangel(self):
+        bredde, hoyde = self.vindu.get_size()
+        skala = min(bredde / BREDDE, hoyde / HOYDE)
+        r = pygame.Rect(
+            0, 0, max(1, round(BREDDE * skala)),
+            max(1, round(HOYDE * skala))
+        )
+        r.center = (bredde // 2, hoyde // 2)
+        return r
+
+    def musposisjon(self, posisjon):
+        r = self.visningsrektangel()
+        if not r.collidepoint(posisjon):
+            return (-1000, -1000)
+        x, y = posisjon
+        return (
+            (x - r.left) * BREDDE / r.width,
+            (y - r.top) * HOYDE / r.height
+        )
+
+    def sett_pause(self):
+        if self.skjermer[-1] == "spill":
+            self.skjermer.append("pause")
+            self.gui.valg["pause"] = 0
+            self.akkumulator = 0.0
+            self.tog.gi_gass(False)
+            self.tog.brems(False)
+            self.tog.varsle_data(self.bane)
+
+    def handling(self, handling):
+        if handling in ("start", "omstart"):
+            self.ny_tur()
+            self.skjermer = ["spill"]
+        elif handling == "fortsett":
+            if self.skjermer[-1] == "pause":
+                self.skjermer.pop()
+            self.akkumulator = 0.0
+        elif handling == "pause":
+            self.sett_pause()
+        elif handling == "meny":
+            self.skjermer = ["meny"]
+            self.gui.valg["meny"] = 0
+            self.tog.gi_gass(False)
+            self.tog.brems(False)
+            self.tog.varsle_data(self.bane)
+            self.akkumulator = 0.0
+        elif handling == "hjelp":
+            self.skjermer.append("hjelp")
+            self.gui.valg["hjelp"] = 0
+        elif handling == "tilbake":
+            if len(self.skjermer) > 1:
+                self.skjermer.pop()
+        elif handling == "avslutt":
+            self.kjorer = False
+
+    def handter_hendelse(self, hendelse):
+        if hendelse.type == pygame.QUIT:
+            self.kjorer = False
+            return
+        if hendelse.type == pygame.VIDEORESIZE:
+            if hendelse.w > 0 and hendelse.h > 0:
+                self.vindu = pygame.display.set_mode(
+                    (hendelse.w, hendelse.h), pygame.RESIZABLE
+                )
+            return
+        if hendelse.type == pygame.WINDOWFOCUSLOST:
+            self.sett_pause()
+            return
+
+        skjermnavn = self.skjermer[-1]
+        knapper = self.gui.knapper(skjermnavn)
+
+        if hendelse.type == pygame.KEYDOWN:
+            if hendelse.key == pygame.K_ESCAPE:
+                if skjermnavn == "spill":
+                    self.sett_pause()
+                elif skjermnavn == "pause":
+                    self.handling("fortsett")
+                elif skjermnavn == "hjelp":
+                    self.handling("tilbake")
+                return
+
+            if skjermnavn == "spill":
+                if hendelse.key == pygame.K_p:
+                    self.sett_pause()
+                elif hendelse.key == pygame.K_r:
+                    self.handling("omstart")
+                return
+
+            if skjermnavn == "pause" and hendelse.key == pygame.K_p:
+                self.handling("fortsett")
+                return
+
+            if knapper:
+                if hendelse.key in (pygame.K_DOWN, pygame.K_s):
+                    self.gui.valg[skjermnavn] = (
+                        self.gui.valg[skjermnavn] + 1
+                    ) % len(knapper)
+                elif hendelse.key in (pygame.K_UP, pygame.K_w):
+                    self.gui.valg[skjermnavn] = (
+                        self.gui.valg[skjermnavn] - 1
+                    ) % len(knapper)
+                elif hendelse.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    self.handling(knapper[self.gui.valg[skjermnavn]][1])
+
+        elif hendelse.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN):
+            posisjon = self.musposisjon(hendelse.pos)
+            self.gui.mus = posisjon
+
+            if skjermnavn == "spill":
+                if hendelse.type == pygame.MOUSEBUTTONDOWN and hendelse.button == 1:
+                    if self.gui.pauseknapp.collidepoint(posisjon):
+                        self.sett_pause()
+                    elif self.gui.nyknapp.collidepoint(posisjon):
+                        self.handling("omstart")
+            else:
+                for i, (navn, handling, rektangel) in enumerate(knapper):
+                    if rektangel.collidepoint(posisjon):
+                        self.gui.valg[skjermnavn] = i
+                        if (hendelse.type == pygame.MOUSEBUTTONDOWN
+                                and hendelse.button == 1):
+                            self.handling(handling)
+                        break
+
+    def oppdater(self, frame_dt, taster=None):
+        if self.skjermer[-1] != "spill":
+            return
+
+        if taster is None:
+            taster = pygame.key.get_pressed()
+
+        self.tog.gi_gass(taster[pygame.K_RIGHT] or taster[pygame.K_d])
+        self.tog.brems(taster[pygame.K_LEFT] or taster[pygame.K_a])
+
+        self.akkumulator += min(frame_dt, 0.1)
+        while self.akkumulator >= FYSIKK_DT:
+            self.tog.oppdater(FYSIKK_DT, self.bane)
+            self.akkumulator -= FYSIKK_DT
+
+        andel = self.akkumulator / FYSIKK_DT
+        self.synlig_posisjon = self.tog.interpolert_posisjon(andel)
+        self.kamera.oppdater(self.synlig_posisjon, self.bane)
+
+    def tegn(self):
+        self.bakgrunn.tegn(self.lerret, self.kamera)
+        self.bane.tegn(self.lerret, self.kamera, self.synlig_posisjon)
+        self.tog.tegn(
+            self.lerret, self.kamera, self.bane, self.synlig_posisjon
+        )
+        self.gui.tegn(self.lerret, self.skjermer)
+
+        r = self.visningsrektangel()
+        self.vindu.fill((5, 10, 17))
+        bilde = pygame.transform.smoothscale(self.lerret, r.size)
+        self.vindu.blit(bilde, r)
+        pygame.display.flip()
+
+    def kjor(self):
+        try:
+            while self.kjorer:
+                frame_dt = self.klokke.tick(60) / 1000
+                for hendelse in pygame.event.get():
+                    self.handter_hendelse(hendelse)
+                if not self.kjorer:
+                    break
+                self.oppdater(frame_dt)
+                self.tegn()
+        finally:
+            pygame.quit()
+
+
+if __name__ == "__main__":
+    Spill().kjor()
+
